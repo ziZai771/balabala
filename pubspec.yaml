@@ -1,0 +1,58 @@
+name: balabala
+description: "吧啦吧啦 - 手机读书听书软件"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.7.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # 状态管理
+  provider: ^6.1.2
+  # 本地存储
+  shared_preferences: ^2.3.4
+  # 文件选择
+  file_picker: ^11.0.3
+  # 路径管理
+  path_provider: ^2.1.5
+  # 网络请求
+  http: ^1.2.2
+  # WebView
+  webview_flutter: ^4.10.0
+  # HTML解析（Readability）
+  flutter_inappwebview: ^6.1.5
+  html: ^0.15.4
+  # 文字转语音
+  flutter_tts: ^4.2.2
+  # 权限管理
+  permission_handler: ^11.3.1
+  # URL启动
+  url_launcher: ^6.3.1
+  # 国际化
+  intl: ^0.19.0
+  # UUID生成
+  uuid: ^4.5.1
+  # 文件操作
+  mime: ^2.0.0
+  # 压缩/解压（用于配置导出）
+  archive: ^4.0.2
+  # 缓存管理
+  flutter_cache_manager: ^3.4.1
+  # 连接状态
+  connectivity_plus: ^6.1.1
+  # 动画
+  animations: ^2.0.11
+  just_audio: ^0.10.6
+  # 毛玻璃效果
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
