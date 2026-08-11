@@ -21,7 +21,7 @@ class ReaderSettingsSheet extends StatefulWidget {
 class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
   final TextEditingController _blockWordController = TextEditingController();
   // 屏蔽词上限与单条长度限制
-  static const int _maxBlockedWords = 5;
+  static const int _maxBlockedWords = 10;
   static const int _maxBlockWordLength = 50;
 
   @override

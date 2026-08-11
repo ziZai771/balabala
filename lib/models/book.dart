@@ -18,7 +18,7 @@ class Book {
   int chapterCount;
   int currentChapter;
   List<Chapter> chapters;
-  // 本书的屏蔽词列表（阅读设置中添加，上限 5 个、每个限长 50 字）。
+  // 本书的屏蔽词列表（阅读设置中添加，上限 10 个、每个限长 50 字）。
   // 阅读时正文中的屏蔽词会被等长替换为 *（保持字符偏移，不影响进度/TTS 定位）。
   List<String> blockedWords;
 
