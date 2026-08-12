@@ -248,22 +248,20 @@ bool _splitScheduled = false;
   }
 
   List<String> _pageTtsLines() {
+    List<String> splitLines(String text) => text
+        .split('\n')
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        // 过滤纯省略号/装饰分隔行（如 "……"、"……"、"——"），避免朗读怪声/停顿
+        .where((l) => !RegExp(r'^[…\.\-\—=~*☆★\s]{2,}$').hasMatch(l))
+        .toList();
     if (Provider.of<ReadingProvider>(context, listen: false).config.scrollMode) {
       if (_displayText.isEmpty) return [];
       final start = _currentCharIndex.clamp(0, _displayText.length - 1);
       final end = (start + 2000).clamp(start, _displayText.length);
-      return _displayText
-          .substring(start, end)
-          .split('\n')
-          .map((l) => l.trim())
-          .where((l) => l.isNotEmpty)
-          .toList();
+      return splitLines(_displayText.substring(start, end));
     }
-    return _getCurrentPageText()
-        .split('\n')
-        .map((l) => l.trim())
-        .where((l) => l.isNotEmpty)
-        .toList();
+    return splitLines(_getCurrentPageText());
   }
 
   void _speakTtsLine(int lineIndex) {
@@ -271,6 +269,11 @@ bool _splitScheduled = false;
     setState(() => _currentTtsParagraph = lineIndex);
     TtsService().speak(_applyBlockedWords(_ttsLines[lineIndex]),
         startPosition: 0);
+    // 滑动窗口预合成：播放 n 时预取 n+5（跳过省略号等无效隔行的影响）
+    final target = lineIndex + 5;
+    if (target < _ttsLines.length) {
+      TtsService().prefetch(_applyBlockedWords(_ttsLines[target]));
+    }
   }
 
   void _onTtsPageComplete() {
@@ -2319,6 +2322,17 @@ bool _splitScheduled = false;
     }
     await ttsService.speak(_applyBlockedWords(_ttsLines[0]), startPosition: 0);
     if (mounted) setState(() => _currentTtsParagraph = 0);
+    // 滑动窗口预取第 6 段
+    if (_ttsLines.length > 5) {
+      ttsService.prefetch(_applyBlockedWords(_ttsLines[5]));
+    }
+    if (currentVoice?.type == VoiceType.ai) {
+      // AI 音色是网络异步合成，需要等待播放真正开始（最长 20 秒），不能立即回退
+      for (var i = 0; i < 40; i++) {
+        if (ttsService.state == TtsState.playing) break;
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+    }
     if (ttsService.state != TtsState.playing) {
       debugPrint('[TTS] _startTts: state=${ttsService.state} not playing, fallback to system');
       await ttsService.setVoice(VoiceProfile(
@@ -2366,6 +2380,11 @@ bool _splitScheduled = false;
     final ttsService = TtsService();
     ttsService.speak(_applyBlockedWords(_ttsLines[startLine]),
         startPosition: 0);
+    // 滑动窗口预取
+    final target = startLine + 5;
+    if (target < _ttsLines.length) {
+      ttsService.prefetch(_applyBlockedWords(_ttsLines[target]));
+    }
   }
 
   int _findParagraphIndex(int charIndex) {

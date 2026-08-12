@@ -138,6 +138,30 @@ class TtsService {
     }
   }
 
+  final Map<String, String> _prefetchCache = {};
+  static const int _prefetchMax = 6;
+
+  /// 预合成：滑动窗口预取（播放 n 时预取 n+5），消除段落间等待
+  /// 缓存按文本去重，容量超限时淘汰最旧的
+  Future<void> prefetch(String text) async {
+    if (text.isEmpty || text == _currentText) return;
+    if (_currentVoice?.type != VoiceType.ai) return;
+    if (_currentVoice!.aiApiKey.isEmpty) return;
+    if (_prefetchCache.containsKey(text)) return;
+    try {
+      final path = await _callOpenAitts(text);
+      if (path != null) {
+        _prefetchCache[text] = path;
+      }
+      while (_prefetchCache.length > _prefetchMax) {
+        _prefetchCache.remove(_prefetchCache.keys.first);
+      }
+      debugPrint('[TTS] prefetch done (cache=${_prefetchCache.length}): ${text.length > 20 ? text.substring(0, 20) : text}');
+    } catch (e) {
+      debugPrint('[TTS] prefetch ERROR: $e');
+    }
+  }
+
   /// 播放自定义音色音频文件
   Future<void> _speakWithCustom(String text) async {
     final path = _currentVoice!.customVoicePath;
@@ -145,12 +169,7 @@ class TtsService {
     try {
       await _audioPlayer.stop();
       debugPrint('[TTS] setFilePath start: $path');
-      // 强制重新加载 source：先清除再设置，避免相同路径被 just_audio 跳过
-      // （stop 后再次播放相同文件时，setFilePath 会因 source 相同而跳过，导致 play 无效果）
-      try {
-        await _audioPlayer.setAudioSource(AudioSource.uri(Uri.parse('')));
-      } catch (_) {}
-      await _audioPlayer.setFilePath(path);
+      await _audioPlayer.setAudioSource(AudioSource.file(path));
       debugPrint('[TTS] setFilePath ok');
       await _audioPlayer.setSpeed(_mapSpeedToTtsRate(_currentVoice!.speed));
       await _audioPlayer.setVolume(_currentVoice!.volume);
@@ -180,32 +199,49 @@ class TtsService {
       final provider = _currentVoice!.aiModelProvider;
       String? apiResult;
 
-      switch (provider) {
-        case 'openai':
-          apiResult = await _callOpenAitts(text);
-          break;
-        case 'volcengine':
-          apiResult = await _callVolcEngineTts(text);
-          break;
-        default:
-          apiResult = await _callCustomAiTts(text);
+      // 优先使用预合成结果，避免段落间等待
+      if (_prefetchCache.containsKey(text)) {
+        apiResult = _prefetchCache.remove(text);
+      } else {
+        switch (provider) {
+          case 'openai':
+            apiResult = await _callOpenAitts(text);
+            break;
+          case 'volcengine':
+            apiResult = await _callVolcEngineTts(text);
+            break;
+          default:
+            apiResult = await _callCustomAiTts(text);
+        }
       }
 
       if (apiResult != null) {
-        // 用音频播放器播放 AI 返回的音频文件（参照自定义音色文件播放）
+        // 用音频播放器播放 AI 返回的音频文件（每次新建 source，避免空 URI 导致播放器错误状态）
+        await _flutterTts.stop();
         await _audioPlayer.stop();
         try {
-          await _audioPlayer.setAudioSource(AudioSource.uri(Uri.parse('')));
-        } catch (_) {}
-        await _audioPlayer.setFilePath(apiResult);
-        await _audioPlayer.setSpeed(_mapSpeedToTtsRate(_currentVoice!.speed));
-        await _audioPlayer.setVolume(_currentVoice!.volume);
-        _audioPlayer.play();
-        _state = TtsState.playing;
-        _stateController.add(TtsState.playing);
+          debugPrint('[TTS] AI play file: ${apiResult.length > 60 ? apiResult.substring(0, 60) : apiResult}');
+          await _audioPlayer.setAudioSource(AudioSource.file(apiResult));
+          await _audioPlayer.setSpeed(_mapSpeedToTtsRate(_currentVoice!.speed));
+          await _audioPlayer.setVolume(_currentVoice!.volume);
+          await _audioPlayer.play();
+          debugPrint('[TTS] AI playing OK');
+          _state = TtsState.playing;
+          _stateController.add(TtsState.playing);
+        } catch (e) {
+          debugPrint('[TTS] _speakWithAi PLAY ERROR: $e');
+          // 播放失败：跳过该行继续下一行，避免朗读卡死
+          _pageCompleteController.add(null);
+        }
+      } else {
+        debugPrint('[TTS] AI synth failed (apiResult null), skip line');
+        // 合成失败：跳过该行继续下一行，避免朗读卡死
+        _pageCompleteController.add(null);
       }
     } catch (e) {
       debugPrint('[TTS] _speakWithAi ERROR: $e');
+      // 合成/播放失败：跳过该行继续下一行，避免朗读卡死
+      _pageCompleteController.add(null);
     }
   }
 
@@ -255,7 +291,9 @@ class TtsService {
   }
 
   Future<void> pause() async {
-    if (_currentVoice?.type == VoiceType.custom && _currentVoice!.customVoicePath.isNotEmpty) {
+    if ((_currentVoice?.type == VoiceType.custom && _currentVoice!.customVoicePath.isNotEmpty) ||
+        _currentVoice?.type == VoiceType.ai) {
+      // 自定义/AI 音色：音频播放器暂停（AI 音色也走播放器，不能用系统 TTS 控制）
       await _audioPlayer.pause();
       _state = TtsState.paused;
       _stateController.add(TtsState.paused);
@@ -269,7 +307,9 @@ class TtsService {
   }
 
   Future<void> resume() async {
-    if (_currentVoice?.type == VoiceType.custom && _currentVoice!.customVoicePath.isNotEmpty) {
+    if ((_currentVoice?.type == VoiceType.custom && _currentVoice!.customVoicePath.isNotEmpty) ||
+        _currentVoice?.type == VoiceType.ai) {
+      // 自定义/AI 音色：继续播放播放器当前文件（AI 音色无需重新合成）
       _audioPlayer.play();
       _state = TtsState.playing;
       _stateController.add(TtsState.playing);
@@ -296,6 +336,13 @@ class TtsService {
     // 更新当前音色的速度
     if (_currentVoice != null) {
       _currentVoice!.speed = userSpeed;
+    }
+    // AI/自定义音色：播放器变速即时生效，无需重新合成（避免等待与卡顿重复）
+    if (_currentVoice?.type == VoiceType.ai || _currentVoice?.type == VoiceType.custom) {
+      if (_state == TtsState.playing || _state == TtsState.paused) {
+        await _audioPlayer.setSpeed(_mapSpeedToTtsRate(userSpeed));
+      }
+      return;
     }
     await _flutterTts.setSpeechRate(_mapSpeedToTtsRate(userSpeed));
     // 防抖：拖动滑块时避免频繁重启朗读，停止拖动 300ms 后再应用
