@@ -603,7 +603,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
                   controller: apiKeyController,
                   decoration: InputDecoration(
                     labelText: 'API Key',
-                    hintText: 'sk-...',
+                    hintText: '本地服务可任意填写',
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
                     ),

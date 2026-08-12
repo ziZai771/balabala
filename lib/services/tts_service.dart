@@ -192,10 +192,20 @@ class TtsService {
       }
 
       if (apiResult != null) {
-        await _speakWithSystem(text);
+        // 用音频播放器播放 AI 返回的音频文件（参照自定义音色文件播放）
+        await _audioPlayer.stop();
+        try {
+          await _audioPlayer.setAudioSource(AudioSource.uri(Uri.parse('')));
+        } catch (_) {}
+        await _audioPlayer.setFilePath(apiResult);
+        await _audioPlayer.setSpeed(_mapSpeedToTtsRate(_currentVoice!.speed));
+        await _audioPlayer.setVolume(_currentVoice!.volume);
+        _audioPlayer.play();
+        _state = TtsState.playing;
+        _stateController.add(TtsState.playing);
       }
     } catch (e) {
-      await _speakWithSystem(text);
+      debugPrint('[TTS] _speakWithAi ERROR: $e');
     }
   }
 
@@ -207,24 +217,26 @@ class TtsService {
         : 'https://api.openai.com/v1/audio/speech';
 
     try {
-      final response = await http.post(
-        Uri.parse(endpoint),
-        headers: {
-          'Authorization': 'Bearer ${_currentVoice!.aiApiKey}',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'model': _currentVoice!.aiModelName.isNotEmpty ? _currentVoice!.aiModelName : 'tts-1',
-          'input': text,
-          'voice': _currentVoice!.systemVoiceId.isNotEmpty ? _currentVoice!.systemVoiceId : 'alloy',
-          'response_format': 'mp3',
-          'speed': _currentVoice!.speed,
-        }),
-      );
+      final response = await http
+          .post(
+            Uri.parse(endpoint),
+            headers: {
+              'Authorization': 'Bearer ${_currentVoice!.aiApiKey}',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({
+              'model': _currentVoice!.aiModelName.isNotEmpty ? _currentVoice!.aiModelName : 'tts-1',
+              'input': text,
+              'voice': _currentVoice!.systemVoiceId.isNotEmpty ? _currentVoice!.systemVoiceId : 'alloy',
+              'response_format': 'wav',
+              'speed': _currentVoice!.speed,
+            }),
+          )
+          .timeout(const Duration(seconds: 60));
 
       if (response.statusCode == 200) {
         final tempDir = Directory.systemTemp;
-        final file = File('${tempDir.path}/tts_${DateTime.now().millisecondsSinceEpoch}.mp3');
+        final file = File('${tempDir.path}/tts_${DateTime.now().millisecondsSinceEpoch}.wav');
         await file.writeAsBytes(response.bodyBytes);
         return file.path;
       }
