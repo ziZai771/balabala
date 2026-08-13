@@ -277,6 +277,9 @@ bool _splitScheduled = false;
   }
 
   void _onTtsPageComplete() {
+    // 防御：启动阶段（_startTts 直接 speak 第 0 行）完成事件到达时
+    // curPara 可能尚未初始化，跳过避免重复 speak 第 0 行
+    if (_currentTtsParagraph < 0) return;
     if (_ttsLines.isNotEmpty && _currentTtsParagraph < _ttsLines.length - 1) {
       _speakTtsLine(_currentTtsParagraph + 1);
       return;
@@ -1057,7 +1060,6 @@ bool _splitScheduled = false;
 
   @override
   Widget build(BuildContext context) {
-    debugPrint('HOTRELOAD_TEST_123');
     return Consumer<ReadingProvider>(
       builder: (context, readingProvider, _) {
         final config = readingProvider.config;
@@ -1711,7 +1713,6 @@ bool _splitScheduled = false;
   }
 
   void _nextPage() {
-    debugPrint('HOTRELOAD_TEST_123');
     final config = Provider.of<ReadingProvider>(context, listen: false).config;
     if (config.scrollMode) {
       final maxExtent = _scrollController.position.maxScrollExtent;
@@ -2320,8 +2321,11 @@ bool _splitScheduled = false;
       _stopTts();
       return;
     }
-    await ttsService.speak(_applyBlockedWords(_ttsLines[0]), startPosition: 0);
+    // 先标记当前行为第 0 行，再 speak：否则第 0 行（短行）播放完成时
+    // curPara 还是 -1，_onTtsPageComplete 会执行 -1+1=0 再次 speak 第 0 行，
+    // 第二次播放打断第一次 → 第一段开头被跳过
     if (mounted) setState(() => _currentTtsParagraph = 0);
+    await ttsService.speak(_applyBlockedWords(_ttsLines[0]), startPosition: 0);
     // 滑动窗口预取第 6 段
     if (_ttsLines.length > 5) {
       ttsService.prefetch(_applyBlockedWords(_ttsLines[5]));
