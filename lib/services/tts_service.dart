@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -27,6 +27,21 @@ class TtsService {
   final StreamController<double> _progressController = StreamController<double>.broadcast();
   final StreamController<void> _pageCompleteController = StreamController<void>.broadcast();
   Timer? _speedDebounce;
+  DateTime? _lastPageCompleteAt;
+
+  /// 触发一次"段播放完成"（去重防抖：stop/setAudioSource 会引发重复 completed，
+  /// 若不去重，双 completed 会连跳两行造成跳段）
+  void _emitPageComplete() {
+    final now = DateTime.now();
+    if (_lastPageCompleteAt != null &&
+        now.difference(_lastPageCompleteAt!).inMilliseconds < 500) {
+      return;
+    }
+    _lastPageCompleteAt = now;
+    _state = TtsState.stopped;
+    _stateController.add(TtsState.stopped);
+    _pageCompleteController.add(null);
+  }
 
   TtsState get state => _state;
   Stream<TtsState> get stateStream => _stateController.stream;
@@ -48,9 +63,7 @@ class TtsService {
     });
 
     _flutterTts.setCompletionHandler(() {
-      _state = TtsState.stopped;
-      _stateController.add(TtsState.stopped);
-      _pageCompleteController.add(null);
+      _emitPageComplete();
     });
 
     _flutterTts.setCancelHandler(() {
@@ -66,9 +79,7 @@ class TtsService {
     // 自定义音色播放完成时触发翻页
     _audioPlayer.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed) {
-        _state = TtsState.stopped;
-        _stateController.add(TtsState.stopped);
-        _pageCompleteController.add(null);
+        _emitPageComplete();
       }
     });
   }
@@ -231,17 +242,17 @@ class TtsService {
         } catch (e) {
           debugPrint('[TTS] _speakWithAi PLAY ERROR: $e');
           // 播放失败：跳过该行继续下一行，避免朗读卡死
-          _pageCompleteController.add(null);
+          _emitPageComplete();
         }
       } else {
         debugPrint('[TTS] AI synth failed (apiResult null), skip line');
         // 合成失败：跳过该行继续下一行，避免朗读卡死
-        _pageCompleteController.add(null);
+        _emitPageComplete();
       }
     } catch (e) {
       debugPrint('[TTS] _speakWithAi ERROR: $e');
       // 合成/播放失败：跳过该行继续下一行，避免朗读卡死
-      _pageCompleteController.add(null);
+      _emitPageComplete();
     }
   }
 
