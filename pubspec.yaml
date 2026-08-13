@@ -47,6 +47,7 @@ dependencies:
   # 动画
   animations: ^2.0.11
   just_audio: ^0.10.6
+  flutter_local_notifications: ^19.5.0
   # 毛玻璃效果
 
 dev_dependencies:

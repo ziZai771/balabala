@@ -378,76 +378,129 @@ class _TtsControlBarState extends State<TtsControlBar>
       ),
       builder: (context) => Consumer<VoiceProvider>(
         builder: (context, voiceProvider, _) {
-          // 使用 TtsService 中的当前速度，而不是 VoiceProfile 中的
-          final currentVoice = _ttsService.currentVoice ?? voiceProvider.currentVoice;
-          final currentSpeed = currentVoice?.speed ?? 1.0;
-          return SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Center(
-                    child: Container(
-                      width: 40,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: AppTheme.textTertiary.withValues(alpha: 0.3),
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  Text('朗读速度', style: Theme.of(context).textTheme.titleLarge),
-                  const SizedBox(height: 16),
-                  Row(
+          return StatefulBuilder(
+            builder: (context, setSheetState) {
+              // 使用 TtsService 中的当前速度，而不是 VoiceProfile 中的
+              final currentVoice =
+                  _ttsService.currentVoice ?? voiceProvider.currentVoice;
+              double currentSpeed = currentVoice?.speed ?? 1.0;
+              // 实时变速 + 静默持久化（按钮离散调整与拖动结束共用）
+              void applySpeed(double value) {
+                final v = value.clamp(0.5, 5.0);
+                setSheetState(() => currentSpeed = v);
+                _ttsService.setSpeed(v);
+                final voice = voiceProvider.currentVoice;
+                if (voice != null) {
+                  voice.speed = v;
+                  voiceProvider.updateVoiceQuietly(voice);
+                }
+              }
+
+              IconButton buildStepButton({
+                required IconData icon,
+                required bool enabled,
+                required VoidCallback onTap,
+              }) {
+                return IconButton(
+                  onPressed: enabled ? onTap : null,
+                  icon: Icon(icon, size: 26),
+                  color: AppTheme.primaryColor,
+                  disabledColor: AppTheme.textTertiary.withValues(alpha: 0.5),
+                  padding: EdgeInsets.zero,
+                  constraints:
+                      const BoxConstraints(minWidth: 40, minHeight: 40),
+                );
+              }
+
+              return SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('0.5x', style: TextStyle(color: AppTheme.textSecondary)),
-                      Expanded(
-                        child: SliderTheme(
-                          data: SliderThemeData(
-                            trackHeight: 3,
-                            thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8),
-                            overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
-                            activeTrackColor: AppTheme.primaryColor,
-                            inactiveTrackColor: AppTheme.dividerColor,
-                            thumbColor: AppTheme.primaryColor,
-                          ),
-                          child: Slider(
-                            value: currentSpeed,
-                            min: 0.5,
-                            max: 5.0,
-                            divisions: 18,
-                            label: '${currentSpeed.toStringAsFixed(1)}x',
-                            onChanged: (value) {
-                              // 更新 VoiceProfile 中的速度
-                              final voice = voiceProvider.currentVoice;
-                              if (voice != null) {
-                                voice.speed = value;
-                                voiceProvider.updateVoice(voice);
-                              }
-                              // 调用 TtsService.setSpeed 实时生效
-                              _ttsService.setSpeed(value);
-                            },
+                      Center(
+                        child: Container(
+                          width: 40,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: AppTheme.textTertiary.withValues(alpha: 0.3),
+                            borderRadius: BorderRadius.circular(2),
                           ),
                         ),
                       ),
-                      Text('5.0x', style: TextStyle(color: AppTheme.textSecondary)),
+                      const SizedBox(height: 20),
+                      Text('朗读速度',
+                          style: Theme.of(context).textTheme.titleLarge),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Text('0.5x',
+                              style: TextStyle(
+                                  color: AppTheme.textSecondary)),
+                          buildStepButton(
+                            icon: Icons.remove_circle_outline,
+                            enabled: currentSpeed > 0.5,
+                            onTap: () => applySpeed(currentSpeed - 0.25),
+                          ),
+                          Expanded(
+                            child: SliderTheme(
+                              data: SliderThemeData(
+                                trackHeight: 3,
+                                thumbShape: const RoundSliderThumbShape(
+                                    enabledThumbRadius: 8),
+                                overlayShape: const RoundSliderOverlayShape(
+                                    overlayRadius: 16),
+                                activeTrackColor: AppTheme.primaryColor,
+                                inactiveTrackColor: AppTheme.dividerColor,
+                                thumbColor: AppTheme.primaryColor,
+                              ),
+                              child: Slider(
+                                value: currentSpeed,
+                                min: 0.5,
+                                max: 5.0,
+                                divisions: 18,
+                                label:
+                                    '${currentSpeed.toStringAsFixed(1)}x',
+                                onChanged: (value) {
+                                  setSheetState(() => currentSpeed = value);
+                                  // 只实时变速。不要调 updateVoice：会触发
+                                  // notifyListeners → applyCurrentVoice →
+                                  // 重启朗读，拖动时同一句循环重播
+                                  _ttsService.setSpeed(value);
+                                },
+                                onChangeEnd: (value) {
+                                  // 拖动结束才持久化，且不触发通知
+                                  applySpeed(value);
+                                },
+                              ),
+                            ),
+                          ),
+                          buildStepButton(
+                            icon: Icons.add_circle_outline,
+                            enabled: currentSpeed < 5.0,
+                            onTap: () => applySpeed(currentSpeed + 0.25),
+                          ),
+                          Text('5.0x',
+                              style: TextStyle(
+                                  color: AppTheme.textSecondary)),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Center(
+                        child: Text(
+                          '当前速度: ${currentSpeed.toStringAsFixed(1)}x',
+                          style:
+                              Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            color: AppTheme.primaryColor,
+                          ),
+                        ),
+                      ),
                     ],
                   ),
-                  const SizedBox(height: 8),
-                  Center(
-                    child: Text(
-                      '当前速度: ${currentSpeed.toStringAsFixed(1)}x',
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: AppTheme.primaryColor,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+                ),
+              );
+            },
           );
         },
       ),

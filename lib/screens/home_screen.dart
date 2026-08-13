@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/app_provider.dart';
 import '../core/theme.dart';
+import '../widgets/mini_tts_player.dart';
 import 'bookshelf_screen.dart';
 import 'discover_screen.dart';
 import 'settings_screen.dart';
@@ -45,18 +46,28 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     final isDark = Provider.of<AppProvider>(context).isDarkMode;
     
     return Scaffold(
-      body: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 300),
-        transitionBuilder: (child, animation) {
-          return FadeTransition(
-            opacity: animation,
-            child: child,
-          );
-        },
-        child: KeyedSubtree(
-          key: ValueKey(_currentIndex),
-          child: _screens[_currentIndex],
-        ),
+      body: Stack(
+        children: [
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 300),
+            transitionBuilder: (child, animation) {
+              return FadeTransition(
+                opacity: animation,
+                child: child,
+              );
+            },
+            child: KeyedSubtree(
+              key: ValueKey(_currentIndex),
+              child: _screens[_currentIndex],
+            ),
+          ),
+          // 朗读悬浮窗：屏幕中部右侧，仅在朗读进行中显示
+          Positioned(
+            right: 16,
+            bottom: MediaQuery.of(context).size.height * 0.5,
+            child: const MiniTtsPlayer(),
+          ),
+        ],
       ),
       bottomNavigationBar: Container(
         decoration: BoxDecoration(

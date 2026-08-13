@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
 import '../models/voice_profile.dart';
 import '../models/book.dart';
+import 'tts_notification.dart';
 
 enum TtsState { stopped, playing, paused }
 
@@ -28,18 +29,32 @@ class TtsService {
   final StreamController<void> _pageCompleteController = StreamController<void>.broadcast();
   Timer? _speedDebounce;
   DateTime? _lastPageCompleteAt;
+  bool _suppressComplete = false;
+  // 停止代次：stop() 自增。合成耗时较长，合成完成时若代次已变（用户已停止），
+  // 丢弃结果不再播放，防止"点停止后上一句合成完又响起来"。
+  int _stopGen = 0;
+  // 当前朗读上下文（供悬浮窗/通知跳转回书定位使用）
+  Book? _nowPlayingBook;
+  String? _nowPlayingText;
+  int _nowPlayingCharIndex = 0;
+  final StreamController<void> _nowPlayingController =
+      StreamController<void>.broadcast();
 
   /// 触发一次"段播放完成"（去重防抖：stop/setAudioSource 会引发重复 completed，
   /// 若不去重，双 completed 会连跳两行造成跳段）
   void _emitPageComplete() {
+    // 播放切换期间（_speakWithAi 设置新源时）旧源会重放 completed，
+    // 合成耗时可能超过 500ms 防抖窗口，用开关直接屏蔽
+    if (_suppressComplete) return;
     final now = DateTime.now();
     if (_lastPageCompleteAt != null &&
         now.difference(_lastPageCompleteAt!).inMilliseconds < 500) {
       return;
     }
     _lastPageCompleteAt = now;
-    _state = TtsState.stopped;
-    _stateController.add(TtsState.stopped);
+    // 注意：不要在这里把 state 置为 stopped——段与段之间（尤其合成空档期）
+    // 朗读会话仍在进行，置 stopped 会让悬浮窗/通知闪烁消失，也会被
+    // _startTts 误判为"AI 未播放"回退系统音色
     _pageCompleteController.add(null);
   }
 
@@ -49,6 +64,36 @@ class TtsService {
   Stream<void> get pageCompleteStream => _pageCompleteController.stream;
   VoiceProfile? get currentVoice => _currentVoice;
   Book? get currentBook => _currentBook;
+  Stream<void> get nowPlayingStream => _nowPlayingController.stream;
+  Book? get nowPlayingBook => _nowPlayingBook;
+  String? get nowPlayingText => _nowPlayingText;
+  int get nowPlayingCharIndex => _nowPlayingCharIndex;
+
+  /// 更新当前朗读位置（阅读器每读一段时调用），供悬浮窗跳转定位
+  void updateNowPlaying(Book book, int charIndex, String text) {
+    _nowPlayingBook = book;
+    _nowPlayingCharIndex = charIndex;
+    _nowPlayingText = text;
+    _nowPlayingController.add(null);
+    // 同步通知栏：书名为正文，点击回书定位用 payload
+    TtsNotification.show(
+      bookTitle: book.title,
+      playing: _state == TtsState.playing,
+      payload: jsonEncode({
+        'id': book.id,
+        'char': charIndex,
+        'text': text,
+      }),
+    );
+  }
+
+  /// 朗读停止时清除悬浮窗上下文
+  void clearNowPlaying() {
+    _nowPlayingBook = null;
+    _nowPlayingText = null;
+    _nowPlayingController.add(null);
+    TtsNotification.hide();
+  }
   int get currentPosition => _currentPosition;
 
   Future<void> init() async {
@@ -81,6 +126,21 @@ class TtsService {
       if (state.processingState == ProcessingState.completed) {
         _emitPageComplete();
       }
+    });
+
+    // 状态变化同步通知栏（暂停/恢复切换标题）
+    _stateController.stream.listen((s) {
+      final book = _nowPlayingBook;
+      if (book == null || s == TtsState.stopped) return;
+      TtsNotification.show(
+        bookTitle: book.title,
+        playing: s == TtsState.playing,
+        payload: jsonEncode({
+          'id': book.id,
+          'char': _nowPlayingCharIndex,
+          'text': _nowPlayingText ?? '',
+        }),
+      );
     });
   }
 
@@ -139,9 +199,10 @@ class TtsService {
   Future<void> speak(String text, {int startPosition = 0}) async {
     _currentText = text;
     _currentPosition = startPosition;
+    final gen = _stopGen;
 
     if (_currentVoice?.type == VoiceType.ai && _currentVoice!.aiApiKey.isNotEmpty) {
-      await _speakWithAi(text);
+      await _speakWithAi(text, stopGen: gen);
     } else if (_currentVoice?.type == VoiceType.custom && _currentVoice!.customVoicePath.isNotEmpty) {
       await _speakWithCustom(text);
     } else {
@@ -150,16 +211,28 @@ class TtsService {
   }
 
   final Map<String, String> _prefetchCache = {};
+  final Set<String> _prefetchPending = {};
   static const int _prefetchMax = 6;
+  Future<void>? _prefetchChain;
 
-  /// 预合成：滑动窗口预取（播放 n 时预取 n+5），消除段落间等待
-  /// 缓存按文本去重，容量超限时淘汰最旧的
+  /// 预合成：串行执行（GPT-SoVITS 后端单 GPU 推理，并发会排队反而更慢），
+  /// 播放 n 段时批量预取 n+1 ~ n+5，消除段落间合成等待。
+  /// 缓存按文本去重，容量超限时淘汰最旧的。
   Future<void> prefetch(String text) async {
     if (text.isEmpty || text == _currentText) return;
     if (_currentVoice?.type != VoiceType.ai) return;
     if (_currentVoice!.aiApiKey.isEmpty) return;
     if (_prefetchCache.containsKey(text)) return;
+    if (_prefetchPending.contains(text)) return; // 已在队列中，避免重复排队
+    _prefetchPending.add(text);
+    // 串行队列：上一次预合成完成后再合成本次，避免并发请求在服务端排队
+    final prev = _prefetchChain;
+    final completer = Completer<void>();
+    _prefetchChain = completer.future;
+    await prev;
     try {
+      // 排队期间该文本可能已被朗读消耗或由更早的排队项合成完成，执行前再查一次
+      if (_prefetchCache.containsKey(text) || text == _currentText) return;
       final path = await _callOpenAitts(text);
       if (path != null) {
         _prefetchCache[text] = path;
@@ -170,6 +243,9 @@ class TtsService {
       debugPrint('[TTS] prefetch done (cache=${_prefetchCache.length}): ${text.length > 20 ? text.substring(0, 20) : text}');
     } catch (e) {
       debugPrint('[TTS] prefetch ERROR: $e');
+    } finally {
+      _prefetchPending.remove(text);
+      completer.complete();
     }
   }
 
@@ -203,7 +279,7 @@ class TtsService {
     }
   }
 
-  Future<void> _speakWithAi(String text) async {
+  Future<void> _speakWithAi(String text, {required int stopGen}) async {
     if (_currentVoice == null) return;
 
     try {
@@ -211,7 +287,9 @@ class TtsService {
       String? apiResult;
 
       // 优先使用预合成结果，避免段落间等待
-      if (_prefetchCache.containsKey(text)) {
+      final cacheHit = _prefetchCache.containsKey(text);
+      debugPrint('[TTS] speak cacheHit=$cacheHit text="${text.length > 12 ? text.substring(0, 12) : text}"');
+      if (cacheHit) {
         apiResult = _prefetchCache.remove(text);
       } else {
         switch (provider) {
@@ -226,20 +304,35 @@ class TtsService {
         }
       }
 
+      // 合成期间用户可能已停止：代次变了就丢弃，不再播放
+      if (stopGen != _stopGen) {
+        debugPrint('[TTS] speak aborted after stop (gen $stopGen != $_stopGen)');
+        return;
+      }
+
       if (apiResult != null) {
         // 用音频播放器播放 AI 返回的音频文件（每次新建 source，避免空 URI 导致播放器错误状态）
         await _flutterTts.stop();
         await _audioPlayer.stop();
+        // 屏蔽旧源在切换期间重放的 completed（防止"真完成 + 切换假完成"跳段）
+        _suppressComplete = true;
         try {
           debugPrint('[TTS] AI play file: ${apiResult.length > 60 ? apiResult.substring(0, 60) : apiResult}');
           await _audioPlayer.setAudioSource(AudioSource.file(apiResult));
           await _audioPlayer.setSpeed(_mapSpeedToTtsRate(_currentVoice!.speed));
           await _audioPlayer.setVolume(_currentVoice!.volume);
-          await _audioPlayer.play();
-          debugPrint('[TTS] AI playing OK');
+          // 新源已就绪，之后的 completed 都是新源的真完成，解除屏蔽
+          _suppressComplete = false;
           _state = TtsState.playing;
           _stateController.add(TtsState.playing);
+          // play() 的 Future 要等播放结束才 resolve，不能 await（否则 speak 挂起，
+          // 且播完的 completed 会先于 finally 到达被屏蔽，朗读卡住）
+          unawaited(_audioPlayer.play().catchError((e) {
+            debugPrint('[TTS] AI play async ERROR: $e');
+            _emitPageComplete();
+          }));
         } catch (e) {
+          _suppressComplete = false;
           debugPrint('[TTS] _speakWithAi PLAY ERROR: $e');
           // 播放失败：跳过该行继续下一行，避免朗读卡死
           _emitPageComplete();
@@ -321,7 +414,16 @@ class TtsService {
     if ((_currentVoice?.type == VoiceType.custom && _currentVoice!.customVoicePath.isNotEmpty) ||
         _currentVoice?.type == VoiceType.ai) {
       // 自定义/AI 音色：继续播放播放器当前文件（AI 音色无需重新合成）
-      _audioPlayer.play();
+      if (_audioPlayer.processingState == ProcessingState.completed) {
+        // 当前音频已播完（如恢复前恰好播完）：推进下一段，避免朗读卡死
+        _emitPageComplete();
+        return;
+      }
+      // play() 的 Future 要等播放结束才 resolve，不能 await（与 _speakWithAi 同理）
+      unawaited(_audioPlayer.play().catchError((e) {
+        debugPrint('[TTS] resume play ERROR: $e');
+        _emitPageComplete();
+      }));
       _state = TtsState.playing;
       _stateController.add(TtsState.playing);
       return;
@@ -334,12 +436,13 @@ class TtsService {
   }
 
   Future<void> stop() async {
+    // 先递增停止代次并置状态，让在途合成/播放立即失效
+    _stopGen++;
+    _state = TtsState.stopped;
+    _stateController.add(TtsState.stopped);
+    clearNowPlaying();
     await _audioPlayer.stop();
-    final result = await _flutterTts.stop();
-    if (result == 1) {
-      _state = TtsState.stopped;
-      _stateController.add(TtsState.stopped);
-    }
+    await _flutterTts.stop();
   }
 
   /// 设置速度并实时生效

@@ -21,8 +21,11 @@ import '../widgets/tts_control_bar.dart';
 
 class ReaderScreen extends StatefulWidget {
   final Book book;
+  /// 从悬浮窗返回：恢复到该字符位置并续上朗读上下文（章节窗口内偏移）
+  final int? restoreTtsCharIndex;
+  final String? restoreTtsText;
 
-  const ReaderScreen({super.key, required this.book});
+  const ReaderScreen({super.key, required this.book, this.restoreTtsCharIndex, this.restoreTtsText});
 
   @override
   State<ReaderScreen> createState() => _ReaderScreenState();
@@ -55,6 +58,10 @@ bool _splitScheduled = false;
   List<String> _paragraphs = [];
   int _currentTtsParagraph = -1;
   List<String> _ttsLines = [];
+  // 当前 TTS 批次的结束字符位置（滚动模式，按行对齐），批次读完后从这里续读
+  int _ttsBatchEnd = 0;
+  // 窗口扩展续读防重入（扩展期间完成事件到达时不重复扩展）
+  bool _ttsExtending = false;
   List<GlobalKey> _paragraphKeys = [];
   List<double> _paragraphHeights = [];
   List<int> _paragraphOffsets = [];
@@ -258,7 +265,14 @@ bool _splitScheduled = false;
     if (Provider.of<ReadingProvider>(context, listen: false).config.scrollMode) {
       if (_displayText.isEmpty) return [];
       final start = _currentCharIndex.clamp(0, _displayText.length - 1);
-      final end = (start + 2000).clamp(start, _displayText.length);
+      var end = (start + 2000).clamp(start, _displayText.length);
+      // 批边界对齐到行尾：避免把一行拦腰截断（截断会导致朗读文本与预取文本
+      // 不一致、缓存无法命中，且听感上句子被切开）
+      if (end < _displayText.length) {
+        final nl = _displayText.indexOf('\n', end);
+        if (nl != -1) end = nl + 1;
+      }
+      _ttsBatchEnd = end;
       return splitLines(_displayText.substring(start, end));
     }
     return splitLines(_getCurrentPageText());
@@ -267,13 +281,52 @@ bool _splitScheduled = false;
   void _speakTtsLine(int lineIndex) {
     if (lineIndex < 0 || lineIndex >= _ttsLines.length) return;
     setState(() => _currentTtsParagraph = lineIndex);
-    TtsService().speak(_applyBlockedWords(_ttsLines[lineIndex]),
-        startPosition: 0);
-    // 滑动窗口预合成：播放 n 时预取 n+5（跳过省略号等无效隔行的影响）
-    final target = lineIndex + 5;
-    if (target < _ttsLines.length) {
-      TtsService().prefetch(_applyBlockedWords(_ttsLines[target]));
+    final text = _applyBlockedWords(_ttsLines[lineIndex]);
+    // 上报朗读上下文，供悬浮窗/通知跳转回书定位
+    TtsService().updateNowPlaying(widget.book, _currentCharIndex, text);
+    TtsService().speak(text, startPosition: 0);
+    // 滑动窗口预合成：播放 n 段时预取 n+1 ~ n+5（串行队列合成，跳过省略号等无效行）
+    for (var i = 1; i <= 5; i++) {
+      final target = lineIndex + i;
+      if (target < _ttsLines.length) {
+        TtsService().prefetch(_applyBlockedWords(_ttsLines[target]));
+      }
     }
+  }
+
+  /// 从悬浮窗/通知返回：定位到朗读处并恢复高亮，若正在播放则不打断
+  void _restoreTtsContext() {
+    final charIndex = widget.restoreTtsCharIndex;
+    if (charIndex == null || !mounted) return;
+    final tts = TtsService();
+    if (tts.state == TtsState.stopped) return;
+    if (tts.nowPlayingBook?.id != widget.book.id) return;
+
+    _currentCharIndex = charIndex;
+    _ttsLines = _pageTtsLines();
+    if (_ttsLines.isEmpty) return;
+    int idx = 0;
+    final text = widget.restoreTtsText;
+    if (text != null) {
+      final i = _ttsLines.indexOf(text);
+      if (i >= 0) idx = i;
+    }
+    setState(() {
+      _isTtsPlaying = true;
+      _currentTtsParagraph = idx;
+    });
+    if (tts.state == TtsState.playing &&
+        tts.nowPlayingText == _ttsLines[idx]) {
+      // 正在播这一段：只恢复高亮与滚动位置，不打断播放
+      if (_scrollController.hasClients) {
+        _scrollToCharIndex(charIndex);
+      }
+      return;
+    }
+    if (_scrollController.hasClients) {
+      _scrollToCharIndex(charIndex);
+    }
+    _speakTtsLine(idx);
   }
 
   void _onTtsPageComplete() {
@@ -291,7 +344,7 @@ bool _splitScheduled = false;
         .config
         .scrollMode;
     if (isScroll) {
-      final next = _currentCharIndex + 2000;
+      final next = _ttsBatchEnd;
       if (next < _displayText.length) {
         _currentCharIndex = next;
         _ttsLines = _pageTtsLines();
@@ -303,7 +356,8 @@ bool _splitScheduled = false;
           _stopTts();
         }
       } else {
-        _stopTts();
+        // 当前窗口已读完：向后扩展窗口（下一章）继续连读，而不是停止
+        _extendTtsWindow();
       }
       return;
     }
@@ -315,6 +369,55 @@ bool _splitScheduled = false;
       } else {
         _stopTts();
       }
+    } else {
+      _stopTts();
+    }
+  }
+
+  /// 滚动模式批次读完后，当前窗口（±预加载章）已无更多文本：
+  /// 向后扩展窗口（加载下一章为中心的新窗口）继续连读，而不是直接停止。
+  Future<void> _extendTtsWindow() async {
+    if (_ttsExtending) return;
+    final book = widget.book;
+    if (book.chapters.isEmpty) {
+      _stopTts();
+      return;
+    }
+    // 目标 = 窗口内最后一章的下一章
+    final target = _windowChapters.isNotEmpty
+        ? _windowChapters.last + 1
+        : book.currentChapter + 1;
+    if (target < 0 || target >= book.chapters.length) {
+      _stopTts();
+      return;
+    }
+    _ttsExtending = true;
+    try {
+      debugPrint('[TTS] extend window to chapter $target');
+      if (book.source == BookSource.url) {
+        await _loadChapterWindow(target);
+      } else {
+        await _loadLocalChapterWindow(target, restorePosition: false);
+      }
+    } catch (e) {
+      debugPrint('[TTS] window extend ERROR: $e');
+      _stopTts();
+      _ttsExtending = false;
+      return;
+    }
+    _ttsExtending = false;
+    if (!mounted || !_isTtsPlaying) return; // 期间用户已停止
+    if (!_windowChapters.contains(target)) {
+      // 扩展失败（如在线书网络失败），不再继续，避免重复朗读同一批
+      debugPrint('[TTS] window extend failed: chapter $target not loaded');
+      _stopTts();
+      return;
+    }
+    _ttsLines = _pageTtsLines();
+    if (_ttsLines.isNotEmpty) {
+      // 滚动跟随到新窗口起点
+      _scrollToCharIndex(_currentCharIndex);
+      _speakTtsLine(0);
     } else {
       _stopTts();
     }
@@ -347,11 +450,11 @@ bool _splitScheduled = false;
     Provider.of<ReadingProvider>(context, listen: false).loadBookmarks(book.id);
 
     if (book.source == BookSource.url && book.chapters.isNotEmpty) {
-      _loadChapterWindow(book.currentChapter);
+      _loadChapterWindow(book.currentChapter).then((_) => _restoreTtsContext());
     } else if (book.source == BookSource.local && book.chapters.isNotEmpty) {
       // 而非一次性分页整本书。整本书分页会把 16M+ 字符切成数万页，占满堆内存，
       final chapterIndex = ChapterService().findChapterIndex(book.chapters, book.currentPosition);
-      _loadLocalChapterWindow(chapterIndex);
+      _loadLocalChapterWindow(chapterIndex).then((_) => _restoreTtsContext());
     } else {
       if (book.source == BookSource.url && book.content.isEmpty) {
         _windowChapters = [];
@@ -2326,9 +2429,9 @@ bool _splitScheduled = false;
     // 第二次播放打断第一次 → 第一段开头被跳过
     if (mounted) setState(() => _currentTtsParagraph = 0);
     await ttsService.speak(_applyBlockedWords(_ttsLines[0]), startPosition: 0);
-    // 滑动窗口预取第 6 段
-    if (_ttsLines.length > 5) {
-      ttsService.prefetch(_applyBlockedWords(_ttsLines[5]));
+    // 滑动窗口预合成：启动时预取第 1~5 段（串行队列）
+    for (var i = 1; i <= 5 && i < _ttsLines.length; i++) {
+      ttsService.prefetch(_applyBlockedWords(_ttsLines[i]));
     }
     if (currentVoice?.type == VoiceType.ai) {
       // AI 音色是网络异步合成，需要等待播放真正开始（最长 20 秒），不能立即回退
@@ -2338,6 +2441,13 @@ bool _splitScheduled = false;
       }
     }
     if (ttsService.state != TtsState.playing) {
+      if (currentVoice?.type == VoiceType.ai) {
+        // AI 音色合成失败（服务端不可用/超时）：不回退系统音色（机械音），
+        // 直接停止，避免用户听到音色突变
+        debugPrint('[TTS] _startTts: AI voice not playing (server unavailable?), stop without system fallback');
+        _stopTts();
+        return;
+      }
       debugPrint('[TTS] _startTts: state=${ttsService.state} not playing, fallback to system');
       await ttsService.setVoice(VoiceProfile(
         id: 'system_fallback',
@@ -2347,7 +2457,7 @@ bool _splitScheduled = false;
         speed: 1.0,
         pitch: 1.0,
       ));
-    await ttsService.speak(_applyBlockedWords(_ttsLines[0]), startPosition: 0);
+      await ttsService.speak(_applyBlockedWords(_ttsLines[0]), startPosition: 0);
     }
     if (ttsService.state != TtsState.playing) {
       debugPrint('[TTS] _startTts: still not playing, stop');
@@ -2384,10 +2494,12 @@ bool _splitScheduled = false;
     final ttsService = TtsService();
     ttsService.speak(_applyBlockedWords(_ttsLines[startLine]),
         startPosition: 0);
-    // 滑动窗口预取
-    final target = startLine + 5;
-    if (target < _ttsLines.length) {
-      ttsService.prefetch(_applyBlockedWords(_ttsLines[target]));
+    // 滑动窗口预取：startLine+1 ~ +5（串行队列）
+    for (var i = 1; i <= 5; i++) {
+      final target = startLine + i;
+      if (target < _ttsLines.length) {
+        ttsService.prefetch(_applyBlockedWords(_ttsLines[target]));
+      }
     }
   }
 

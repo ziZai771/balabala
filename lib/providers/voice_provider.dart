@@ -37,6 +37,13 @@ class VoiceProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 静默保存音色（不触发 notifyListeners）。
+  /// 调速拖动等高频场景用：updateVoice 会通知监听者 → applyCurrentVoice 重启朗读，
+  /// 拖动时每秒触发几十次会造成同一句循环重播。
+  Future<void> updateVoiceQuietly(VoiceProfile voice) async {
+    await _storage.updateVoice(voice);
+  }
+
   Future<void> deleteVoice(String id) async {
     await _storage.deleteVoice(id);
     _voices.removeWhere((v) => v.id == id);

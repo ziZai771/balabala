@@ -70,6 +70,37 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
     Provider.of<BookProvider>(context, listen: false).updateBook(book);
     widget.onBlockedWordsChanged?.call();
   }
+
+  /// 加减号步进按钮（与拖动滑条并存），到达边界时置灰不可点
+  Widget _buildStepButton({
+    required IconData icon,
+    required bool enabled,
+    required VoidCallback onTap,
+  }) {
+    return IconButton(
+      onPressed: enabled ? onTap : null,
+      icon: Icon(icon, size: 26),
+      color: AppTheme.primaryColor,
+      disabledColor: AppTheme.textTertiary.withValues(alpha: 0.5),
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+    );
+  }
+
+  void _setLineHeight(ReadingProvider provider, ReadingConfig config, double value) {
+    provider.updateConfig(
+      ReadingConfig(
+        fontSize: config.fontSize,
+        fontFamily: config.fontFamily,
+        lineHeight: value,
+        theme: config.theme,
+        animation: config.animation,
+        nightMode: config.nightMode,
+        screenBrightness: config.screenBrightness,
+        voiceProfileId: config.voiceProfileId,
+      ),
+    );
+  }
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -106,6 +137,11 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
                 Row(
                   children: [
                     Icon(Icons.text_fields, size: 16, color: AppTheme.textSecondary),
+                    _buildStepButton(
+                      icon: Icons.remove_circle_outline,
+                      enabled: config.fontSize > 12,
+                      onTap: () => provider.setFontSize((config.fontSize - 1).clamp(12.0, 36.0)),
+                    ),
                     Expanded(
                       child: SliderTheme(
                         data: SliderThemeData(
@@ -126,8 +162,21 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
                         ),
                       ),
                     ),
+                    _buildStepButton(
+                      icon: Icons.add_circle_outline,
+                      enabled: config.fontSize < 36,
+                      onTap: () => provider.setFontSize((config.fontSize + 1).clamp(12.0, 36.0)),
+                    ),
                     Icon(Icons.text_fields, size: 24, color: AppTheme.textSecondary),
                   ],
+                ),
+                Center(
+                  child: Text(
+                    '当前字号: ${config.fontSize.round()}',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: AppTheme.primaryColor,
+                    ),
+                  ),
                 ),
                 const SizedBox(height: 20),
 
@@ -136,6 +185,11 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
                 Row(
                   children: [
                     Text('1.0', style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
+                    _buildStepButton(
+                      icon: Icons.remove_circle_outline,
+                      enabled: config.lineHeight > 1.0,
+                      onTap: () => _setLineHeight(provider, config, (config.lineHeight - 0.1).clamp(1.0, 3.0)),
+                    ),
                     Expanded(
                       child: SliderTheme(
                         data: SliderThemeData(
@@ -152,23 +206,25 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
                           max: 3.0,
                           divisions: 20,
                           label: config.lineHeight.toStringAsFixed(1),
-                          onChanged: (value) => provider.updateConfig(
-                            ReadingConfig(
-                              fontSize: config.fontSize,
-                              fontFamily: config.fontFamily,
-                              lineHeight: value,
-                              theme: config.theme,
-                              animation: config.animation,
-                              nightMode: config.nightMode,
-                              screenBrightness: config.screenBrightness,
-                              voiceProfileId: config.voiceProfileId,
-                            ),
-                          ),
+                          onChanged: (value) => _setLineHeight(provider, config, value),
                         ),
                       ),
                     ),
+                    _buildStepButton(
+                      icon: Icons.add_circle_outline,
+                      enabled: config.lineHeight < 3.0,
+                      onTap: () => _setLineHeight(provider, config, (config.lineHeight + 0.1).clamp(1.0, 3.0)),
+                    ),
                     Text('3.0', style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
                   ],
+                ),
+                Center(
+                  child: Text(
+                    '当前行间距: ${config.lineHeight.toStringAsFixed(1)}',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: AppTheme.primaryColor,
+                    ),
+                  ),
                 ),
                 const SizedBox(height: 20),
 
