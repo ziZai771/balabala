@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -37,6 +37,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   late PageController _pageController;
   late AnimationController _uiAnimationController;
   bool _showUI = true;
+  // 悬浮窗跳回续播时吞掉"旧段 completed 竞态事件"（详见 _restoreTtsContext）
+  bool _swallowNextPageComplete = false;
   int _currentCharIndex = 0;
   // 否则 UI 显示/隐藏两种布局的页首位置错位，每次 toggle 锚点逐次前移
   bool _suppressPageCharSync = false;
@@ -299,6 +301,8 @@ bool _splitScheduled = false;
     final charIndex = widget.restoreTtsCharIndex;
     if (charIndex == null || !mounted) return;
     final tts = TtsService();
+    debugPrint('[TTS] restore enter: state=' + tts.state.toString() +
+        ' busy=' + tts.audioBusy.toString());
     if (tts.state == TtsState.stopped) return;
     if (tts.nowPlayingBook?.id != widget.book.id) return;
 
@@ -306,9 +310,21 @@ bool _splitScheduled = false;
     _ttsLines = _pageTtsLines();
     if (_ttsLines.isEmpty) return;
     int idx = 0;
-    final text = widget.restoreTtsText;
-    if (text != null) {
-      final i = _ttsLines.indexOf(text);
+    // 优先用"实际正在/最后朗读的文本"定位行：跳回瞬间旧段 completed 事件
+    // 可能已抢先推进到新段（nowPlayingText 已更新），此时用恢复文本会
+    // 定位到旧行造成重复/连跳
+    final currentText = tts.nowPlayingText;
+    final restoreText = widget.restoreTtsText;
+    if (currentText != null) {
+      final i = _ttsLines.indexOf(currentText);
+      if (i >= 0) {
+        idx = i;
+      } else if (restoreText != null) {
+        final i2 = _ttsLines.indexOf(restoreText);
+        if (i2 >= 0) idx = i2;
+      }
+    } else if (restoreText != null) {
+      final i = _ttsLines.indexOf(restoreText);
       if (i >= 0) idx = i;
     }
     setState(() {
@@ -321,6 +337,28 @@ bool _splitScheduled = false;
       if (_scrollController.hasClients) {
         _scrollToCharIndex(charIndex);
       }
+      // 但若音频实际已停摆（退出书籍期间 ReaderScreen 被销毁、段完成事件
+      // 无人消费导致朗读读完当前段后没有推进），跳回时续播下一段，
+      // 避免"点悬浮窗回来朗读就哑了"。续播前吞掉一次竞态 completed。
+      if (!tts.audioBusy) {
+        _swallowNextPageComplete = true;
+        if (idx + 1 < _ttsLines.length) {
+          _speakTtsLine(idx + 1);
+        } else {
+          // 批尾：清吞标志后走正常批完成逻辑（窗口扩展/翻页）
+          _swallowNextPageComplete = false;
+          _onTtsPageComplete();
+        }
+      }
+      return;
+    }
+    if (tts.state == TtsState.paused &&
+        tts.nowPlayingText == _ttsLines[idx]) {
+      // 暂停后跳回：恢复继续当前段，不重播
+      if (_scrollController.hasClients) {
+        _scrollToCharIndex(charIndex);
+      }
+      tts.resume();
       return;
     }
     if (_scrollController.hasClients) {
@@ -330,6 +368,12 @@ bool _splitScheduled = false;
   }
 
   void _onTtsPageComplete() {
+    // 悬浮窗跳回续播时吞掉一次竞态的 completed（旧段完成事件与续播 speak
+    // 碰撞会导致连跳两段 + Loading interrupted）
+    if (_swallowNextPageComplete) {
+      _swallowNextPageComplete = false;
+      return;
+    }
     // 防御：启动阶段（_startTts 直接 speak 第 0 行）完成事件到达时
     // curPara 可能尚未初始化，跳过避免重复 speak 第 0 行
     if (_currentTtsParagraph < 0) return;
@@ -2534,7 +2578,8 @@ bool _splitScheduled = false;
   }
 
   void _exitReader() {
-    _stopTts();
+    // 退出书籍不停止朗读：朗读继续由悬浮窗/通知承载，用户可通过悬浮窗停止。
+    // （此前这里 _stopTts 会 clearNowPlaying + stopped，导致退出后悬浮窗不显示）
     _saveProgress();
     Navigator.pop(context);
   }

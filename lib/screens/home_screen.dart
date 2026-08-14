@@ -61,10 +61,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               child: _screens[_currentIndex],
             ),
           ),
-          // 朗读悬浮窗：屏幕中部右侧，仅在朗读进行中显示
+          // 朗读悬浮窗：右下角，位于书架 FAB 上方（FAB 高 56 + 默认边距 16 = 72，
+          // 悬浮窗 bottom 92 留 20 间隙，互不遮挡），仅在朗读进行中显示
           Positioned(
             right: 16,
-            bottom: MediaQuery.of(context).size.height * 0.5,
+            bottom: 92,
             child: const MiniTtsPlayer(),
           ),
         ],

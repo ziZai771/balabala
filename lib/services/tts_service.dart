@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -68,6 +68,17 @@ class TtsService {
   Book? get nowPlayingBook => _nowPlayingBook;
   String? get nowPlayingText => _nowPlayingText;
   int get nowPlayingCharIndex => _nowPlayingCharIndex;
+
+  /// 音频是否处于"忙"状态：实际在播，或正在加载/缓冲新源。
+  /// 段播完后 just_audio 会先后发 completed+playing=true 与
+  /// completed+playing=false 两个状态（前者是播完瞬态），若只看 playing
+  /// 会把"已播完"误判为"在播"。processingState=completed 时一律视为
+  /// 播完（busy=false），悬浮窗跳回时据此续播下一段。
+  bool get audioBusy =>
+      _audioPlayer.processingState != ProcessingState.completed &&
+      (_audioPlayer.playing ||
+          _audioPlayer.processingState == ProcessingState.loading ||
+          _audioPlayer.processingState == ProcessingState.buffering);
 
   /// 更新当前朗读位置（阅读器每读一段时调用），供悬浮窗跳转定位
   void updateNowPlaying(Book book, int charIndex, String text) {
