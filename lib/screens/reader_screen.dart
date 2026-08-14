@@ -301,8 +301,7 @@ bool _splitScheduled = false;
     final charIndex = widget.restoreTtsCharIndex;
     if (charIndex == null || !mounted) return;
     final tts = TtsService();
-    debugPrint('[TTS] restore enter: state=' + tts.state.toString() +
-        ' busy=' + tts.audioBusy.toString());
+    debugPrint('[TTS] restore enter: state=${tts.state} busy=${tts.audioBusy}');
     if (tts.state == TtsState.stopped) return;
     if (tts.nowPlayingBook?.id != widget.book.id) return;
 
@@ -1480,6 +1479,10 @@ bool _splitScheduled = false;
     );
 
     return Listener(
+      // 关键：behavior 必须非 deferToChild——slide 模式 child 是 PageView
+      // （参与 hit-test），而 fade/curl/none 的 AnimatedSwitcher child 是
+      // Text（不参与 hit-test），deferToChild 会导致这些模式下点击翻页失效
+      behavior: HitTestBehavior.opaque,
       // 区分点击与滑动：记录按下位置，抬起时位移超过阈值视为滑动，
       onPointerDown: (event) {
         _pointerDownPos = event.localPosition;
@@ -1542,111 +1545,52 @@ bool _splitScheduled = false;
             );
           },
         );
-      case PageAnimation.curl:
-        // 点击左右 1/3 区域翻页（_nextPage/_previousPage 更新 _currentPage），
-        pageView = _buildAnimatedPageSwitcher(
-          config,
-          textColor,
-          keyName: 'curl',
-          curlStyle: true,
-        );
-      case PageAnimation.fade:
-        pageView = _buildAnimatedPageSwitcher(
-          config,
-          textColor,
-          keyName: 'fade',
-          curlStyle: false,
-        );
       case PageAnimation.none:
-        pageView = PageView.builder(
-          key: const ValueKey('none'),
-          controller: _pageController,
-          scrollDirection: Axis.horizontal,
-          physics: const NeverScrollableScrollPhysics(),
-          onPageChanged: (page) {
-            setState(() {
-              _currentPage = page;
-              if (_suppressPageCharSync) {
-                _suppressPageCharSync = false;
-              } else {
-                _currentCharIndex = _charIndexForPage(page);
-              }
-            });
-            if (_scrollController.hasClients) {
-              _scrollController.jumpTo(0);
-            }
-            _saveProgress();
-          },
-          itemCount: _pages.length,
-          itemBuilder: (context, index) {
-            return ClipRect(
-              child: Align(
-                alignment: Alignment.topLeft,
-                child: _buildTextContent(config, textColor, pageIndex: index),
-              ),
-            );
-          },
+        pageView = _buildAnimatedPageSwitcher(
+          config,
+          textColor,
+          keyName: 'none',
+          instant: true,
         );
     }
     return pageView;
   }
 
-  /// 动画效果：每页内容包 TweenAnimationBuilder，页面首次构建时从透明淡入（fade），
+  /// "无动画"模式：页面瞬切（不依赖 PageView，点击翻页由外层 Listener
+  /// 处理；Listener 已设 HitTestBehavior.opaque 保证 Text 内容可点击）
   Widget _buildAnimatedPageSwitcher(
     ReadingConfig config,
     Color textColor, {
     required String keyName,
-    required bool curlStyle,
+    required bool instant,
   }) {
-    final animationDuration = const Duration(milliseconds: 250);
-    return PageView.builder(
-      key: ValueKey(keyName),
-      controller: _pageController,
-      scrollDirection: Axis.horizontal,
-      onPageChanged: (page) {
-        setState(() {
-          _currentPage = page;
-          if (_suppressPageCharSync) {
-            _suppressPageCharSync = false;
-          } else {
-            _currentCharIndex = _charIndexForPage(page);
-          }
-        });
-        if (_scrollController.hasClients) {
-          _scrollController.jumpTo(0);
-        }
-        _saveProgress();
-      },
-      itemCount: _pages.length,
-      itemBuilder: (context, index) {
-        final content = RepaintBoundary(
-          child: _buildTextContent(config, textColor,
-              pageIndex: index, enableSelection: false),
+    return AnimatedSwitcher(
+      duration: instant ? Duration.zero : const Duration(milliseconds: 300),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      layoutBuilder: (currentChild, previousChildren) {
+        // 旧页退出与新页进入重叠交叉，避免切换瞬间空白闪屏
+        return Stack(
+          alignment: Alignment.topLeft,
+          children: [
+            ...previousChildren,
+            if (currentChild != null) currentChild,
+          ],
         );
-        return TweenAnimationBuilder<double>(
-          tween: Tween(begin: 0.0, end: 1.0),
-          duration: animationDuration,
-          curve: Curves.easeOut,
-          builder: (context, value, child) {
-            if (!curlStyle) {
-              return Opacity(opacity: value, child: child);
-            }
-            return Opacity(
-              opacity: value,
-              child: Transform.translate(
-                offset: Offset((1 - value) * 24, 0),
-                child: child,
-              ),
-            );
-          },
-          child: ClipRect(
-            child: Align(
-              alignment: Alignment.topLeft,
-              child: content,
-            ),
+      },
+      transitionBuilder: (child, anim) {
+        return FadeTransition(opacity: anim, child: child);
+      },
+      child: KeyedSubtree(
+        key: ValueKey('$keyName-$_currentPage'),
+        child: ClipRect(
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: _buildTextContent(config, textColor,
+                pageIndex: _currentPage, enableSelection: false),
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 
@@ -1896,13 +1840,22 @@ bool _splitScheduled = false;
         _scrollController.jumpTo(0);
       }
       _saveProgress();
-    } else if (widget.book.chapters.isNotEmpty &&
-        widget.book.currentChapter < widget.book.chapters.length - 1) {
-      if (widget.book.source == BookSource.url) {
-        _loadChapterWindow(widget.book.currentChapter + 1);
-      } else {
-        _loadLocalChapterWindow(widget.book.currentChapter + 1,
-            restorePosition: false);
+    } else if (widget.book.chapters.isNotEmpty) {
+      // 章尾跨章：窗口含 center-1/center/center+1 三章，页末实际在
+      // center+1 章尾。此前用 book.currentChapter(=center) 判断并加载
+      // center+1 章，锚点定位到 center+1 章"开头"，导致从 center+1 章尾
+      // 翻页反而跳回该章开头，翻不过去。改用实际所在章 + 精确偏移定位。
+      final actualChapter = _chapterIndexAtChar(_currentCharIndex);
+      if (actualChapter >= 0 &&
+          actualChapter < widget.book.chapters.length - 1) {
+        if (widget.book.source == BookSource.url) {
+          _loadChapterWindow(actualChapter + 1);
+        } else {
+          _loadLocalChapterWindow(actualChapter + 1,
+              restorePosition: false,
+              seekFullOffset:
+                  widget.book.chapters[actualChapter + 1].startIndex);
+        }
       }
     }
   }
@@ -1943,13 +1896,20 @@ bool _splitScheduled = false;
         _scrollController.jumpTo(0);
       }
       _saveProgress();
-    } else if (widget.book.chapters.isNotEmpty &&
-        widget.book.currentChapter > 0) {
-      if (widget.book.source == BookSource.url) {
-        _loadChapterWindow(widget.book.currentChapter - 1);
-      } else {
-        _loadLocalChapterWindow(widget.book.currentChapter - 1,
-            restorePosition: false);
+    } else if (widget.book.chapters.isNotEmpty) {
+      // 章头回翻：页 0 实际在 center-1 章开头。此前用 center 判断并加载
+      // center-1 章、锚点定位到该章"开头"，导致从 center-1 章头回翻又
+      // 跳回该章开头，翻不过去。改用实际所在章，定位到上一章末尾页。
+      final actualChapter = _chapterIndexAtChar(_currentCharIndex);
+      if (actualChapter > 0) {
+        if (widget.book.source == BookSource.url) {
+          _loadChapterWindow(actualChapter - 1);
+        } else {
+          _loadLocalChapterWindow(actualChapter - 1,
+              restorePosition: false,
+              seekFullOffset:
+                  widget.book.chapters[actualChapter].startIndex - 1);
+        }
       }
     }
   }
@@ -2740,8 +2700,10 @@ _SplitResult _splitTextInIsolate(_SplitTask task) {
   }
 
   if (!task.scrollMode && task.viewportHeight > 0) {
-    // 与渲染精确匹配，避免低估导致页面最后一行溢出被裁（半截字）
-    final paraMargin = lineHeight * 1.5;
+    // 与渲染精确匹配：页面文本用 '\n\n' 连接段落（渲染时为一个空行，
+    // 高度 = 1 × lineHeight）。此前按 1.5 行估算段落间距，打包高度虚高，
+    // 每页实际渲染内容偏少，页底出现大面积留白。
+    final paraMargin = lineHeight;
     final pageHeight = task.viewportHeight;
     final safePageHeight = pageHeight - lineHeight * 0.3;
     final chapterTitleSet = task.chapterTitles.toSet();

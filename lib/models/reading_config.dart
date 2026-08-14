@@ -38,12 +38,18 @@ class ReadingConfig {
     'scrollMode': scrollMode,
   };
 
-  factory ReadingConfig.fromMap(Map<String, dynamic> map) => ReadingConfig(
+  factory ReadingConfig.fromMap(Map<String, dynamic> map) {
+    // 兼容旧数据：curl/fade 已删除，旧值 2/3 回退为滑动
+    final animRaw = (map['animation'] ?? 1) as int;
+    final animation = animRaw >= 0 && animRaw < PageAnimation.values.length
+        ? PageAnimation.values[animRaw]
+        : PageAnimation.slide;
+    return ReadingConfig(
     fontSize: (map['fontSize'] ?? 18.0).toDouble(),
     fontFamily: map['fontFamily'] ?? 'System',
     lineHeight: (map['lineHeight'] ?? 1.8).toDouble(),
     theme: ReadingTheme.values[map['theme'] ?? 0],
-    animation: PageAnimation.values[map['animation'] ?? 1],
+    animation: animation,
     autoScroll: map['autoScroll'] ?? false,
     autoScrollSpeed: (map['autoScrollSpeed'] ?? 1.0).toDouble(),
     showLineNumber: map['showLineNumber'] ?? false,
@@ -51,8 +57,9 @@ class ReadingConfig {
     screenBrightness: map['screenBrightness'] ?? 80,
     voiceProfileId: map['voiceProfileId'] ?? '',
     scrollMode: map['scrollMode'] ?? false,
-  );
+    );
+  }
 }
 
 enum ReadingTheme { classic, green, dark, gray, paper }
-enum PageAnimation { none, slide, curl, fade }
+enum PageAnimation { none, slide }

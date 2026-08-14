@@ -257,8 +257,6 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet> {
                   children: [
                     _buildAnimationChip('无', PageAnimation.none, config.animation, provider),
                     _buildAnimationChip('滑动', PageAnimation.slide, config.animation, provider),
-                    _buildAnimationChip('翻页', PageAnimation.curl, config.animation, provider),
-                    _buildAnimationChip('淡入', PageAnimation.fade, config.animation, provider),
                   ],
                 ),
                 const SizedBox(height: 24),
